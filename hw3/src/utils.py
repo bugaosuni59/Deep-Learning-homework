@@ -31,8 +31,8 @@ def get_args_parser():
                         help='location of the data corpus')
     parser.add_argument('--seed', type=int, default=1111,
                         help='random seed')
-    # parser.add_argument('--cuda', action='store_true',
-    #                     help='use CUDA')
+    parser.add_argument('--cuda', action='store_true',
+                        help='use CUDA')
     parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                         help='report interval')
     parser.add_argument('--save', type=str, default='model_dir',
