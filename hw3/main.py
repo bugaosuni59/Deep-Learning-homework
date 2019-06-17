@@ -4,29 +4,24 @@ import time
 import math
 import torch
 import torch.nn as nn
-
 import data
-# from .data import Corpus
 import model
-# from .model import LMModel
-# from src import model
-import os
-import os.path as osp
+import bleu
 
 parser = argparse.ArgumentParser(description='PyTorch ptb Language Model')
-parser.add_argument('--epochs', type=int, default=40,
+parser.add_argument('--epochs', type=int, default=100,
                     help='upper epoch limit')
-parser.add_argument('--train_batch_size', type=int, default=200, metavar='N',
+parser.add_argument('--train_batch_size', type=int, default=128, metavar='N',
                     help='batch size')
-parser.add_argument('--eval_batch_size', type=int, default=200, metavar='N',
+parser.add_argument('--eval_batch_size', type=int, default=128, metavar='N',
                     help='eval batch size')
 parser.add_argument('--max_sql', type=int, default=35,
                     help='sequence length')
 parser.add_argument('--seed', type=int, default=1234,
                     help='set random seed')
 parser.add_argument('--gpu_id', type=int, default=-1, help='GPU device id used')
-parser.add_argument('--emsize', type=int, default=1500, help='size of word embeddings ')
-parser.add_argument('--nhid', type=int, default=1500,
+parser.add_argument('--emsize', type=int, default=512, help='size of word embeddings ')
+parser.add_argument('--nhid', type=int, default=512,
                     help='number of hidden units per layer ')
 parser.add_argument('--nlayers', type=int, default=1, help='number of layers ')
 parser.add_argument('--tied', action='store_true',
@@ -66,12 +61,13 @@ data_loader = data.Corpus("data/ptb", batch_size, args.max_sql)
 ########################################
 # Build LMModel model (bulid your language model here)
 nvoc = len(data_loader.vocabulary)
-model = model.LMModel(rnn_type=args.model,
-                      nvoc=nvoc,
-                      ninput=args.emsize,
-                      nhid=args.nhid,
-                      nlayers=args.nlayers,
-                      tie_weights=args.tied)
+# model = model.LMModel(rnn_type=args.model,
+#                       nvoc=nvoc,
+#                       ninput=args.emsize,
+#                       nhid=args.nhid,
+#                       nlayers=args.nlayers,
+#                       tie_weights=args.tied)
+model = model.LSTMAtt(rnn_type=args.model, nvoc=nvoc, ninput=args.emsize, nhid=args.nhid, nlayers=args.nlayers)
 model = model.to(device)
 lr = args.lr
 best_val_loss = None
@@ -96,33 +92,34 @@ def repackage_hidden(h):
 def evaluate():
     model.eval()
     data_loader.set_valid()
-    model.eval()
-    total_loss = 0.
+    total_loss = 0.0
+    bleu_sum = 0.0
     nvoc = len(data_loader.word_id)
     hidden = model.init_hidden(eval_batch_size)
     with torch.no_grad():
-        for i in range(0, data_loader.valid.size(0) - 1, args.max_sql):
+        for i in range(0, data_loader.valid.size(0), args.max_sql):
             data, target, end_flag = data_loader.get_batch()
             data = data.to(device)
             target = target.to(device)
             output, hidden = model(data, hidden)
             output_flat = output.view(-1, nvoc)
-            total_loss += criterion(output_flat, target).item()
+            total_loss += len(data) * criterion(output_flat, target).item()
             hidden = repackage_hidden(hidden)
-    return total_loss / (len(data_loader.valid))
+            _, predicted = torch.max(output, -1)
+            label = target.view(predicted.size()).data.cpu().numpy()
+            predicted = predicted.data.cpu().numpy()
+            bleu_sum += len(data) * bleu.cal_blue_score(predicted, label)
+
+    return total_loss / (len(data_loader.valid)), bleu_sum
 
 
-########################################
-
-
-# WRITE CODE HERE within two '#' bar
-########################################
 # Train Function
 def train():
     model.train()
     data_loader.set_train()
     end_flag = False
-    total_loss = 0.
+    total_loss = 0.0
+    epoch_loss = 0.0
     start_time = time.time()
     hidden = model.init_hidden(args.train_batch_size)
     batch = 0
@@ -139,8 +136,6 @@ def train():
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        # for p in model.parameters():
-        #     p.data.add_(-lr, p.grad.data)
 
         optimizer.step()
 
@@ -148,20 +143,11 @@ def train():
         # epoch_loss = total_loss / nvoc
         epoch_loss = total_loss / (data_loader.train.size(0) / args.max_sql)
 
-        # if batch % args.log_interval == 0 and batch > 0:
-        #     cur_loss = total_loss / args.log_interval
-        #     elapsed = time.time() - start_time
-        #     print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
-        #           'loss {:5.2f} | ppl {:8.2f}'.format(
-        #         epoch, batch, data_loader.train_batch_num, lr,
-        #                       elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
-        #     total_loss = 0.
-        #     start_time = time.time()
         batch += 1
     print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:03.3f} | time {:5.2f} | '
           'loss {:5.2f} | ppl {:8.2f}'.format(
         epoch, batch, data_loader.train_batch_num, lr,
-        time.time() - start_time, epoch_loss, math.exp(epoch_loss)))
+        time.time() - start_time, epoch_loss, math.pow(2, epoch_loss)))
 
 
 ########################################
@@ -171,11 +157,11 @@ def train():
 for epoch in range(1, args.epochs + 1):
     epoch_start_time = time.time()
     train()
-    val_loss = evaluate()
+    val_loss, bleu_sum = evaluate()
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-          'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                     val_loss, math.exp(val_loss)))
+          'valid ppl {:6.2f} | bleu {:3.2f} |'.format(epoch, (time.time() - epoch_start_time), val_loss,
+                                                      math.pow(2, val_loss), bleu_sum))
     print('-' * 89)
     # Save the model if the validation loss is the best we've seen so far.
     if not best_val_loss or val_loss < best_val_loss:
@@ -185,4 +171,4 @@ for epoch in range(1, args.epochs + 1):
     # else:
     #     # Anneal the learning rate if no improvement has been seen in the validation dataset.
     #     lr /= 4.0
-print('| The end | best valid loss {:5.2f} | best valid pp {:8.2f}'.format(best_val_loss, math.exp(best_val_loss)))
+print('| The end | best valid loss {:5.2f} | best valid pp {:8.2f}'.format(best_val_loss, math.pow(2, best_val_loss)))
